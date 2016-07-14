@@ -1,0 +1,171 @@
+__author__ = 'Tomasz Ksepka'
+
+import cv2
+import numpy as np
+from PyQt4 import QtGui, QtCore
+import dlib
+import gabor_filters
+import run_nn_classifier
+import itertools
+import rotate_image
+import pickle
+import video_feed
+import face_recog_main
+
+predictor_path = 'shape_predictor_68_face_landmarks.dat'
+detector = dlib.get_frontal_face_detector()
+predictor = dlib.shape_predictor(predictor_path)
+pipeline = pickle.load(open('nnclf2.pk1', 'rb'))
+
+
+gf = gabor_filters.build_filters()
+
+
+class Capture(QtGui.QWidget):
+
+    def __init__(self, video_source, videofeedwindow, on_next_frame=None):
+        super(QtGui.QWidget, self).__init__()
+
+        self.video_frame = QtGui.QLabel()
+        layout = QtGui.QVBoxLayout()
+        layout.addWidget(self.video_frame)
+        self.setLayout(layout)
+        self.video_source = video_source
+        self.videofeedwindow = videofeedwindow
+        self.current_frame = np.array([])
+        self.current_emotions = {}
+        self.on_next_frame = on_next_frame
+
+    def get_frame(self):
+        ret, frame = self.video_source.read()
+
+        self.current_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+
+        frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+
+        ## Draw face bounding boxes and facial points on frame
+        extracted_faces = []
+        
+        faces = run_nn_classifier.get_faces(frame)
+        for face in faces:
+            shape = predictor(frame, face)
+            points = [(p.x, p.y) for p in shape.parts()]
+            rotate_image.draw_face(self.current_frame, face)
+            rotate_image.draw_points(self.current_frame, points)
+            
+            extracted_face = frame[face.top():face.bottom(), face.left():face.right()]
+	    #extracted_face = rotate_image.rotate_image(extracted_face)
+	    pred, conf = face_recog_main.recognizer.predict(extracted_face)
+	    if conf > 40:
+	       print pred
+            #extracted_faces.append(extracted_face)
+
+        height, width = self.current_frame.shape[:2]
+
+        image = QtGui.QImage(self.current_frame, width, height, QtGui.QImage.Format_RGB888)
+        image = QtGui.QPixmap.fromImage(image)
+        self.video_frame.setPixmap(image)
+
+        thread = GetEmotionsThread(frame, faces, self)
+        #thread.return_emotions.connect(self.update)
+        thread.start()
+
+        if self.on_next_frame is not None:
+	    self.on_next_frame()
+        # return image
+
+    def update_emotions(self):
+        self.videofeedwindow.update_table(self.current_emotions)
+
+
+    def start(self):
+        self.timer = QtCore.QTimer()
+        self.timer.timeout.connect(self.get_frame)
+        self.timer.start(5)
+
+
+    def stop(self):
+        self.timer.stop()
+
+    if self.on_next_frame is not None:
+	self.on_next_frame()
+
+
+class GetEmotionsThread(QtCore.QThread):
+
+    #return_emotions = QtCore.pyqtSignal(dict)
+
+    def __init__(self, frame, faces, cw):
+        QtCore.QThread.__init__(self)
+        self.frame = frame
+        self.faces = faces
+        self.cw = cw
+
+    def __del__(self):
+        self.wait()
+
+    def run(self):
+        emotions = {}
+
+        emotions[0] = 0
+        emotions[1] = 0
+        emotions[2] = 0
+        emotions[3] = 0
+        emotions[4] = 0
+
+        num_faces = len(self.faces)
+
+        if not num_faces:
+            self.cw.current_emotions = emotions
+            self.cw.update_emotions()
+        else:
+            faces_stored = []
+            features_stored = []
+
+            for face in self.faces:
+                size = int(face.width()*0.2)
+                if face.left() < size or (face.right() + size) > self.frame.shape[1] or face.top() < size or (face.bottom() + size > self.frame.shape[0]):
+                    num_faces = num_faces - 1
+                    continue
+                extracted_faces = rotate_image.cut_face(self.frame, face)
+                extracted_faces = rotate_image.rotate_image(extracted_faces)
+                faces_stored.append(extracted_faces)
+
+                dim = extracted_faces.shape[0]
+                face2 = dlib.rectangle(0, 0, dim, dim)
+
+                features = run_nn_classifier.generate_feature_vector(extracted_faces, face2)
+                features_stored.append(features)
+
+            if num_faces:
+                new_np_features = np.array([np.array(x) for x in features_stored])
+                emotions_list = pipeline.predict(new_np_features)
+
+                emotions_list = emotions_list.tolist()
+                emotions_list = list(itertools.chain.from_iterable(emotions_list))
+
+                for emotion in emotions_list:
+                    emotions[emotion] += 1
+                    # if emotion == 0:
+                        # emotions[emotion] += 1
+                    # elif emotion == 1:
+                        # emotions[emotion] += 1
+                    # elif emotion == 2:
+                        # emotions[emotion] += 1
+                    # elif emotion == 3:
+                        # emotions[emotion] += 1
+                    # elif emotion == 4:
+                        # emotions[emotion] += 1
+                #self.return_emotions.emit(emotions)
+                self.cw.current_emotions = emotions
+                self.cw.update_emotions()
+
+                print 'Emotions: ' + str(emotions_list)
+            else:
+                print "faces out of frame"
+
+
+
+
+
+
